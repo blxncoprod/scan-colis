@@ -1,1 +1,137 @@
 <!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Scan Colis</title>
+<style>
+  body{margin:0;font-family:system-ui,sans-serif;background:#f6f4ef;color:#1d1b18}
+  main{max-width:560px;margin:0 auto;padding:14px}
+  h1{font-size:22px;margin:4px 0 12px}
+  .stat{font-size:13px;color:#6f6a61;float:right;margin-top:8px}
+  #cam{position:relative;width:100%;aspect-ratio:4/3;background:#000;border-radius:14px;overflow:hidden;display:none}
+  #cam video{width:100%;height:100%;object-fit:cover}
+  #cam .frame{position:absolute;inset:18% 8%;border:3px solid #5fb393;border-radius:10px}
+  button{font-size:16px;padding:14px;border-radius:12px;border:1px solid #ddd;background:#fff;cursor:pointer}
+  .big{width:100%;background:#1f5f4a;color:#fff;border:0;font-weight:600;font-size:18px;padding:18px}
+  .row{display:flex;gap:8px;margin-top:10px}.row button{flex:1}
+  .card{background:#fff;border:1px solid #e4e0d7;border-radius:14px;padding:14px;margin-top:12px}
+  label{font-size:12px;font-weight:600;color:#6f6a61;text-transform:uppercase}
+  input{width:100%;box-sizing:border-box;font:600 18px monospace;padding:10px;border:1px solid #ddd;border-radius:10px;margin:4px 0 10px}
+  .msg{font-size:14px;padding:8px 10px;border-radius:8px}
+  .ok{background:#e3efe9;color:#1f5f4a}.warn{background:#fbeee2;color:#a4561a}
+  #status{font-size:13px;color:#6f6a61;margin-top:6px}
+  li{list-style:none;padding:8px 0;border-top:1px solid #eee;display:flex;justify-content:space-between}
+  ul{padding:0;margin:0}.meta{font-size:12px;color:#6f6a61}
+</style>
+<script src="https://unpkg.com/@zxing/browser@0.1.5/umd/zxing-browser.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+</head>
+<body>
+<main>
+  <span class="stat">Aujourd'hui : <b id="today">0</b> · Total : <b id="total">0</b></span>
+  <h1>Scan Colis</h1>
+  <div id="cam"><video id="video" playsinline muted></video><div class="frame"></div></div>
+  <button class="big" id="scanBtn">Scanner</button>
+  <div id="status"></div>
+
+  <div class="card">
+    <label>Numéro de colis</label><input id="numero" placeholder="—">
+    <label>Date</label><input id="date" placeholder="JJ/MM/AAAA">
+    <div id="msg"></div>
+    <div class="row"><button id="clearBtn">Effacer</button><button id="saveBtn" style="background:#1f5f4a;color:#fff;border:0">Enregistrer</button></div>
+  </div>
+
+  <div class="card">
+    <b>Historique</b>
+    <ul id="list"></ul>
+    <div class="row"><button id="csvBtn">Exporter CSV</button></div>
+  </div>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const pad=n=>String(n).padStart(2,'0');
+const clean=s=>(s||'').toUpperCase().replace(/[\s\-\.]/g,'');
+let scans=JSON.parse(localStorage.getItem('scans')||'[]');
+let controls=null, worker=null, ocrTimer=null, busy=false, barcodeFound=false;
+
+function normDate(s){
+  const m=s.match(/(\d{1,2})\s*[\/.\-]\s*(\d{1,2})\s*[\/.\-]\s*(\d{2,4})/);
+  if(!m) return '';
+  let y=m[3]; if(y.length===2) y='20'+y;
+  return pad(m[1])+'/'+pad(m[2])+'/'+y;
+}
+function check(){
+  const n=clean($('numero').value), d=scans.find(s=>s.numero===n);
+  $('msg').className='msg '+(d?'warn':'ok');
+  $('msg').textContent=!n?'':d?'⚠ Déjà scanné le '+new Date(d.ts).toLocaleString('fr-FR'):'Nouveau colis ✓';
+  if(!n) $('msg').className='';
+}
+function render(){
+  $('list').innerHTML='';
+  scans.forEach(s=>{
+    const li=document.createElement('li');
+    li.innerHTML='<div><div style="font-family:monospace;font-weight:600"></div><div class="meta"></div></div><button>×</button>';
+    li.querySelector('div div').textContent=s.numero;
+    li.querySelector('.meta').textContent='Date : '+(s.date||'—')+' · '+new Date(s.ts).toLocaleString('fr-FR');
+    li.querySelector('button').onclick=()=>{scans=scans.filter(x=>x!==s);save();};
+    $('list').appendChild(li);
+  });
+  const t=new Date().toDateString();
+  $('today').textContent=scans.filter(s=>new Date(s.ts).toDateString()===t).length;
+  $('total').textContent=scans.length;
+}
+function save(){localStorage.setItem('scans',JSON.stringify(scans));render();}
+function beep(){try{navigator.vibrate&&navigator.vibrate(80);}catch(e){}}
+
+async function start(){
+  $('cam').style.display='block'; $('scanBtn').textContent='Arrêter';
+  $('status').textContent='Recherche du code-barres et du texte…';
+  barcodeFound=false;
+  const reader=new ZXingBrowser.BrowserMultiFormatReader();
+  controls=await reader.decodeFromConstraints({video:{facingMode:'environment',width:{ideal:1280}}},$('video'),(res)=>{
+    if(res){ const n=clean(res.getText()); if(n && n!==clean($('numero').value)){ $('numero').value=n; barcodeFound=true; beep(); check(); } }
+  });
+  if(!worker){ $('status').textContent='Préparation de la lecture de texte…'; worker=await Tesseract.createWorker('fra'); $('status').textContent='Scan en cours…'; }
+  ocrTimer=setInterval(ocr,1200);
+}
+async function ocr(){
+  if(busy) return; busy=true;
+  try{
+    const v=$('video'); if(!v.videoWidth) return;
+    const c=document.createElement('canvas'); c.width=v.videoWidth; c.height=v.videoHeight;
+    c.getContext('2d').drawImage(v,0,0);
+    const {data}=await worker.recognize(c);
+    const t=data.text||'';
+    const d=normDate(t); if(d && !$('date').value){ $('date').value=d; beep(); }
+    if(!barcodeFound && !$('numero').value){
+      const c2=(t.replace(/\d{1,2}\s*[\/.\-]\s*\d{1,2}\s*[\/.\-]\s*\d{2,4}/,'').match(/[A-Z0-9][A-Z0-9 \-]{6,}[A-Z0-9]/gi)||[])
+        .map(clean).filter(x=>/\d{5,}/.test(x)).sort((a,b)=>b.length-a.length);
+      if(c2[0]){ $('numero').value=c2[0]; check(); }
+    }
+    if($('numero').value && $('date').value) $('status').textContent='✓ Numéro et date trouvés, vérifie et enregistre.';
+  }finally{busy=false;}
+}
+function stop(){
+  if(controls) controls.stop(); controls=null;
+  clearInterval(ocrTimer); $('cam').style.display='none'; $('scanBtn').textContent='Scanner'; $('status').textContent='';
+}
+$('scanBtn').onclick=()=>controls?stop():start().catch(e=>{$('status').textContent='Caméra refusée ou indisponible.';stop();});
+$('numero').oninput=check;
+$('clearBtn').onclick=()=>{$('numero').value='';$('date').value='';barcodeFound=false;check();};
+$('saveBtn').onclick=()=>{
+  const n=clean($('numero').value); if(!n){$('msg').className='msg warn';$('msg').textContent='Il faut un numéro.';return;}
+  scans.unshift({numero:n,date:$('date').value,ts:Date.now()}); save();
+  $('numero').value='';$('date').value='';barcodeFound=false;check();
+  $('status').textContent='Enregistré ✓ — scanne le colis suivant.';
+};
+$('csvBtn').onclick=()=>{
+  const rows=[['Numero','Date','Scanne le']].concat(scans.map(s=>[s.numero,s.date,new Date(s.ts).toLocaleString('fr-FR')]));
+  const blob=new Blob(['\ufeff'+rows.map(r=>r.map(v=>'"'+String(v).replace(/"/g,'""')+'"').join(';')).join('\r\n')],{type:'text/csv'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='colis.csv'; a.click();
+};
+render();
+</script>
+</body>
+</html>
